@@ -1,23 +1,32 @@
+// ====== 阶段配置（标签、通知文案、时长字段、是否休息）======
+const PHASE = {
+  work:       { label: '🍅 工作时间', titleLabel: '🍅 工作中', lenKey: 'workLen',  isBreak: false },
+  shortBreak: { label: '☕ 休息时间', titleLabel: '☕ 休息中', lenKey: 'shortLen', isBreak: true  },
+  longBreak:  { label: '☕ 长休息',   titleLabel: '☕ 休息中', lenKey: 'longLen',  isBreak: true  },
+};
+
+// 设置项默认值（同时充当 keys + defaults 的单一来源）
+const DEFAULTS = {
+  workLen: 25, shortLen: 5, longLen: 15, maxRounds: 4,
+  soundOn: true, notifyOn: true, autoStart: false,
+};
+
 // ====== 数据状态 ======
 let state = {
-  phase: 'work',        // work | shortBreak | longBreak
-  running: false,
+  ...DEFAULTS,
+  phase: 'work',
   paused: false,
   timeLeft: 25 * 60,
   totalTime: 25 * 60,
   round: 1,
-  maxRounds: 4,
-  workLen: 25,
-  shortLen: 5,
-  longLen: 15,
-  soundOn: true,
-  notifyOn: true,
-  autoStart: false,
-  records: [],          // { date, task, count: 1, timestamp }
+  records: [],          // { date, task, timestamp }
   currentTask: '',
 };
 
 let timerId = null;
+let titleSuffix = ` - ${PHASE.work.titleLabel}`;   // 缓存窗口标题后缀，避免每秒重算
+
+const isRunning = () => timerId !== null;          // 派生：是否在跑计时
 
 // DOM 引用
 const $ = (s) => document.querySelector(s);
@@ -51,6 +60,11 @@ const el = {
   btnSave:     $('#btnSaveSettings'),
 };
 
+// ====== 工具 ======
+const pad2 = (n) => String(n).padStart(2, '0');
+const todayKey = () => new Date().toISOString().slice(0, 10);
+const CIRC = 2 * Math.PI * 90;   // 进度环周长（r=90）
+
 // ====== 发声（Web Audio API） ======
 let audioCtx = null;
 function playBeep() {
@@ -58,75 +72,87 @@ function playBeep() {
   if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   const now = audioCtx.currentTime;
   [880, 1100].forEach((freq, i) => {
+    const t0 = now + i * 0.15;
     const osc = audioCtx.createOscillator();
     const vol = audioCtx.createGain();
     osc.type = 'sine';
     osc.frequency.value = freq;
-    vol.gain.setValueAtTime(0.4, now + i * 0.15);
-    vol.gain.exponentialRampToValueAtTime(0.001, now + i * 0.15 + 0.25);
+    vol.gain.setValueAtTime(0.4, t0);
+    vol.gain.exponentialRampToValueAtTime(0.001, t0 + 0.25);
     osc.connect(vol).connect(audioCtx.destination);
-    osc.start(now + i * 0.15);
-    osc.stop(now + i * 0.15 + 0.25);
+    osc.start(t0);
+    osc.stop(t0 + 0.25);
   });
 }
 
-// ====== 计时器更新 ======
+// ====== 渲染 ======
 function updateDisplay() {
   const m = Math.floor(state.timeLeft / 60);
   const s = state.timeLeft % 60;
-  el.timeDisplay.textContent = `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-
-  // 进度环
-  const total = state.totalTime;
-  const r = 90, circ = 2 * Math.PI * r;
-  const offset = circ * (1 - state.timeLeft / total);
-  el.ringFg.style.strokeDashoffset = offset;
-
-  // 窗口标题
-  const label = state.phase === 'work' ? '🍅 工作中' : '☕ 休息中';
-  document.title = `${el.timeDisplay.textContent} - ${label}`;
+  const text = `${pad2(m)}:${pad2(s)}`;
+  el.timeDisplay.textContent = text;
+  el.ringFg.style.strokeDashoffset = CIRC * (1 - state.timeLeft / state.totalTime);
+  document.title = text + titleSuffix;
 }
 
 function updatePhaseUI() {
-  const isWork = state.phase === 'work';
-  el.phaseLabel.textContent = isWork ? '🍅 工作时间' : '☕ 休息时间';
-  el.phaseLabel.classList.toggle('break', !isWork);
-  el.ringFg.classList.toggle('break', !isWork);
+  const cfg = PHASE[state.phase];
+  el.phaseLabel.textContent = cfg.label;
+  el.phaseLabel.classList.toggle('break', cfg.isBreak);
+  el.ringFg.classList.toggle('break', cfg.isBreak);
   el.roundNum.textContent = state.round;
+  titleSuffix = ` - ${cfg.titleLabel}`;
+}
+
+function setButtons({ start, pause, pauseLabel = '暂停' }) {
+  el.btnStart.disabled = !start;
+  el.btnPause.disabled = !pause;
+  el.btnPause.textContent = pauseLabel;
 }
 
 // ====== 核心逻辑 ======
 function getPhaseTime(phase) {
-  if (phase === 'work') return state.workLen * 60;
-  if (phase === 'shortBreak') return state.shortLen * 60;
-  return state.longLen * 60; // longBreak
+  return state[PHASE[phase].lenKey] * 60;
 }
 
-function switchPhase(nextPhase) {
+// 进入指定阶段并开始计时
+function goToPhase(nextPhase) {
   state.phase = nextPhase;
   state.totalTime = getPhaseTime(nextPhase);
   state.timeLeft = state.totalTime;
-  state.running = true;
   state.paused = false;
+  if (PHASE[nextPhase].isBreak) {
+    state.currentTask = '';
+    el.taskInput.value = '';
+  }
   updatePhaseUI();
   updateDisplay();
-  el.btnStart.disabled = true;
-  el.btnPause.disabled = false;
-
-  if (nextPhase !== 'work') state.currentTask = '';
-  el.taskInput.value = state.currentTask;
-
+  setButtons({ start: false, pause: true });
   startTimer();
 }
 
+// 回到工作阶段空闲态（停止、UI 待命）
+function goToIdle({ clearTask = false } = {}) {
+  stopTimer();
+  state.phase = 'work';
+  state.totalTime = getPhaseTime('work');
+  state.timeLeft = state.totalTime;
+  state.paused = false;
+  if (clearTask) {
+    state.currentTask = '';
+    el.taskInput.value = '';
+  }
+  updatePhaseUI();
+  updateDisplay();
+  setButtons({ start: true, pause: false });
+}
+
 function completePomodoro() {
-  // 记录一个番茄
-  const today = new Date().toISOString().slice(0, 10);
   const task = state.currentTask.trim();
   state.records.push({
-    date: today,
+    date: todayKey(),
     task: task || '未命名任务',
-    timestamp: Date.now()
+    timestamp: Date.now(),
   });
   saveData();
   updateStats();
@@ -135,15 +161,10 @@ function completePomodoro() {
     window.api.notify('🍅 番茄完成！', `太棒了！第 ${state.round} 个番茄完成${task ? '：' + task : ''}`);
   }
 
-  // 决定下一个阶段
-  if (state.round >= state.maxRounds) {
-    // 长休息，然后重置轮次
-    state.round = 1;
-    switchPhase('longBreak');
-  } else {
-    state.round++;
-    switchPhase('shortBreak');
-  }
+  // 决定下一个阶段（达到 maxRounds 则进入长休息并重置轮次）
+  const isLong = state.round >= state.maxRounds;
+  state.round = isLong ? 1 : state.round + 1;
+  goToPhase(isLong ? 'longBreak' : 'shortBreak');
 }
 
 function completeBreak() {
@@ -151,38 +172,19 @@ function completeBreak() {
   if (state.notifyOn) {
     window.api.notify('☕ 休息结束', '该开始工作了！');
   }
-  if (state.autoStart) {
-    switchPhase('work');
-  } else {
-    stopTimer();
-    state.paused = false;
-    state.phase = 'work';
-    state.totalTime = state.workLen * 60;
-    state.timeLeft = state.totalTime;
-    state.running = false;
-    updatePhaseUI();
-    updateDisplay();
-    el.btnStart.disabled = false;
-    el.btnPause.disabled = true;
-  }
+  if (state.autoStart) goToPhase('work');
+  else goToIdle();
 }
 
 function startTimer() {
-  if (timerId) clearInterval(timerId);
+  stopTimer();
   timerId = setInterval(() => {
-    if (!state.paused) {
-      state.timeLeft--;
-      updateDisplay();
-      if (state.timeLeft <= 0) {
-        clearInterval(timerId);
-        timerId = null;
-        state.running = false;
-        if (state.phase === 'work') {
-          completePomodoro();
-        } else {
-          completeBreak();
-        }
-      }
+    state.timeLeft--;
+    updateDisplay();
+    if (state.timeLeft <= 0) {
+      stopTimer();
+      if (state.phase === 'work') completePomodoro();
+      else completeBreak();
     }
   }, 1000);
 }
@@ -194,109 +196,87 @@ function stopTimer() {
 // ====== 控制按钮 ======
 el.btnStart.addEventListener('click', () => {
   if (state.paused) {
+    // 从暂停恢复
     state.paused = false;
-    state.running = true;
-    el.btnPause.textContent = '暂停';
-    el.btnStart.disabled = true;
-    el.btnPause.disabled = false;
+    startTimer();
+    setButtons({ start: false, pause: true });
     return;
   }
-
-  // 重置状态
-  if (!state.running) {
+  if (!isRunning()) {
+    // 从空闲开始
     state.currentTask = el.taskInput.value.trim();
-    state.phase = 'work';
-    state.totalTime = state.workLen * 60;
-    state.timeLeft = state.totalTime;
-    state.running = true;
-    state.paused = false;
-    updatePhaseUI();
-    updateDisplay();
-    el.btnStart.disabled = true;
-    el.btnPause.disabled = false;
-    el.btnPause.textContent = '暂停';
-    startTimer();
+    goToPhase('work');
   }
 });
 
 el.btnPause.addEventListener('click', () => {
-  if (!state.running || state.paused) return;
+  if (!isRunning() || state.paused) return;
   state.paused = true;
-  el.btnPause.textContent = '继续';
-  el.btnStart.disabled = false;
+  stopTimer();                              // 真正停掉 interval，节能
+  setButtons({ start: true, pause: true, pauseLabel: '继续' });
 });
 
 el.btnReset.addEventListener('click', () => {
-  const wasRunning = state.running;
-  stopTimer();
-  state.running = false;
-  state.paused = false;
-  state.phase = 'work';
-  state.totalTime = state.workLen * 60;
-  state.timeLeft = state.totalTime;
-  updatePhaseUI();
-  updateDisplay();
-  el.btnStart.disabled = false;
-  el.btnPause.disabled = true;
-  el.btnPause.textContent = '暂停';
-  el.taskInput.value = '';
-  state.currentTask = '';
+  goToIdle({ clearTask: true });
   document.title = '番茄钟';
 });
 
 el.btnSkip.addEventListener('click', () => {
-  if (!state.running) return;
+  if (!isRunning() && !state.paused) return;
   stopTimer();
-  if (state.phase === 'work') {
-    completePomodoro();
-  } else {
-    completeBreak();
-  }
+  if (state.phase === 'work') completePomodoro();
+  else completeBreak();
 });
 
 // ====== Tab 切换 ======
+function setOnlyActive(nodes, target) {
+  nodes.forEach(n => n.classList.toggle('active', n === target));
+}
+
 $$('.tab').forEach(tab => {
   tab.addEventListener('click', () => {
-    $$('.tab').forEach(t => t.classList.remove('active'));
-    tab.classList.add('active');
-    $$('.page').forEach(p => p.classList.remove('active'));
-    document.getElementById('page-' + tab.dataset.tab).classList.add('active');
-
-    if (tab.dataset.tab === 'stats') updateStats();
+    setOnlyActive($$('.tab'), tab);
+    setOnlyActive($$('.page'), document.getElementById('page-' + tab.dataset.tab));
+    if (tab.dataset.tab === 'stats') renderHistory();
     if (tab.dataset.tab === 'settings') loadSettingsToUI();
   });
 });
 
 // ====== 统计 ======
+// 计数（轻量，每次完成番茄都跑）
 function updateStats() {
-  const today = new Date().toISOString().slice(0, 10);
-  const recs = state.records;
-
-  // 今日
-  const todayRecs = recs.filter(r => r.date === today);
-  el.statToday.textContent = todayRecs.length;
-  el.todayCount.textContent = todayRecs.length;
-
-  // 本周
+  const today = todayKey();
   const now = new Date();
-  const startOfWeek = new Date(now);
-  startOfWeek.setDate(now.getDate() - now.getDay());
-  const weekStart = startOfWeek.toISOString().slice(0, 10);
-  const weekRecs = recs.filter(r => r.date >= weekStart);
-  el.statWeek.textContent = weekRecs.length;
+  const sow = new Date(now);
+  sow.setDate(now.getDate() - now.getDay());
+  const weekStart = sow.toISOString().slice(0, 10);
 
-  // 累计
-  el.statTotal.textContent = recs.length;
+  let todayCount = 0, weekCount = 0;
+  for (const r of state.records) {
+    if (r.date >= weekStart) {
+      weekCount++;
+      if (r.date === today) todayCount++;
+    }
+  }
+  el.statToday.textContent = todayCount;
+  el.statWeek.textContent  = weekCount;
+  el.statTotal.textContent = state.records.length;
+  el.todayCount.textContent = todayCount;
+}
 
-  // 历史列表（最近20条）
-  const sorted = [...recs].reverse().slice(0, 20);
-  if (sorted.length === 0) {
+// 历史列表渲染（重，仅在统计 Tab 激活时跑）
+function renderHistory() {
+  updateStats();
+  const recs = state.records;
+  if (recs.length === 0) {
     el.historyList.innerHTML = '<div class="empty">还没有记录，加油完成第一个番茄吧！</div>';
     return;
   }
-  el.historyList.innerHTML = sorted.map(r => {
+  // 只复制最后 20 条，避免对完整数组 reverse
+  const recent = recs.slice(-20).reverse();
+  el.historyList.innerHTML = recent.map(r => {
     const d = new Date(r.timestamp);
-    const timeStr = `${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+    const timeStr = `${pad2(d.getMonth()+1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
     return `<div class="history-item">
       <span class="task-name">🍅 ${r.task}</span>
       <span class="time-tag">${timeStr}</span>
@@ -309,34 +289,35 @@ el.btnClear.addEventListener('click', () => {
   if (confirm('确定要清空所有番茄记录吗？此操作不可恢复。')) {
     state.records = [];
     saveData();
-    updateStats();
+    renderHistory();
   }
 });
 
 // ====== 设置 ======
 function loadSettingsToUI() {
-  el.setWork.value   = state.workLen;
-  el.setShort.value  = state.shortLen;
-  el.setLong.value   = state.longLen;
-  el.setRounds.value = state.maxRounds;
+  el.setWork.value     = state.workLen;
+  el.setShort.value    = state.shortLen;
+  el.setLong.value     = state.longLen;
+  el.setRounds.value   = state.maxRounds;
   el.setSound.checked  = state.soundOn;
   el.setNotify.checked = state.notifyOn;
   el.setAuto.checked   = state.autoStart;
 }
 
+const normalizeNum = (val, min, def) => Math.max(min, parseInt(val) || def);
+
 el.btnSave.addEventListener('click', () => {
-  state.workLen   = Math.max(1, parseInt(el.setWork.value) || 25);
-  state.shortLen  = Math.max(1, parseInt(el.setShort.value) || 5);
-  state.longLen   = Math.max(1, parseInt(el.setLong.value) || 15);
-  state.maxRounds = Math.max(2, parseInt(el.setRounds.value) || 4);
+  state.workLen   = normalizeNum(el.setWork.value,   1, DEFAULTS.workLen);
+  state.shortLen  = normalizeNum(el.setShort.value,  1, DEFAULTS.shortLen);
+  state.longLen   = normalizeNum(el.setLong.value,   1, DEFAULTS.longLen);
+  state.maxRounds = normalizeNum(el.setRounds.value, 2, DEFAULTS.maxRounds);
   state.soundOn   = el.setSound.checked;
   state.notifyOn  = el.setNotify.checked;
   state.autoStart = el.setAuto.checked;
 
-  // 如果定时器不在运行，更新当前时间
-  if (!state.running) {
-    state.phase = 'work';
-    state.totalTime = state.workLen * 60;
+  // 如果定时器不在运行，刷新当前显示
+  if (!isRunning()) {
+    state.totalTime = getPhaseTime(state.phase);
     state.timeLeft = state.totalTime;
     updateDisplay();
   }
@@ -350,15 +331,8 @@ async function loadData() {
   try {
     const data = await window.api.loadData();
     if (data) {
-      if (data.settings) {
-        state.workLen   = data.settings.workLen   || 25;
-        state.shortLen  = data.settings.shortLen  || 5;
-        state.longLen   = data.settings.longLen   || 15;
-        state.maxRounds = data.settings.maxRounds || 4;
-        state.soundOn   = data.settings.soundOn   !== false;
-        state.notifyOn  = data.settings.notifyOn  !== false;
-        state.autoStart = data.settings.autoStart || false;
-      }
+      // DEFAULTS 提供基线，data.settings 覆盖已存的字段
+      Object.assign(state, DEFAULTS, data.settings || {});
       state.records = data.records || [];
     }
   } catch (e) {
@@ -366,37 +340,32 @@ async function loadData() {
   }
 
   // 初始化 UI
-  state.totalTime = state.workLen * 60;
+  state.totalTime = getPhaseTime('work');
   state.timeLeft = state.totalTime;
   updatePhaseUI();
   updateDisplay();
   loadSettingsToUI();
-  if (el.taskInput) el.taskInput.value = state.currentTask;
+  el.taskInput.value = state.currentTask;
   updateStats();
 }
 
 function saveData() {
-  window.api.saveData({
-    records: state.records,
-    settings: {
-      workLen: state.workLen,
-      shortLen: state.shortLen,
-      longLen: state.longLen,
-      maxRounds: state.maxRounds,
-      soundOn: state.soundOn,
-      notifyOn: state.notifyOn,
-      autoStart: state.autoStart,
-    }
-  });
+  const settings = {};
+  for (const k of Object.keys(DEFAULTS)) settings[k] = state[k];
+  window.api.saveData({ records: state.records, settings });
 }
 
 // ====== 键盘快捷键 ======
 document.addEventListener('keydown', (e) => {
-  // 忽略输入框内的快捷键
   if (e.target.tagName === 'INPUT') return;
   switch (e.key) {
-    case ' ':  e.preventDefault(); state.running && !state.paused ? el.btnPause.click() : (state.paused ? el.btnStart.click() : el.btnStart.click()); break;
-    case 'r': case 'R': el.btnReset.click(); break;
+    case ' ':
+      e.preventDefault();
+      (isRunning() && !state.paused ? el.btnPause : el.btnStart).click();
+      break;
+    case 'r': case 'R':
+      el.btnReset.click();
+      break;
   }
 });
 
