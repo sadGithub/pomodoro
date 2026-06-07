@@ -1,0 +1,28 @@
+{
+  "name": "pomodoro-app",
+  "version": "2.0.0",
+  "description": "桌面番茄钟定时器",
+  "main": "main.js",
+  "scripts": {
+    "start": "cross-env ELECTRON_RUN_AS_NODE= electron .",
+    "start:cmd": "set ELECTRON_RUN_AS_NODE=&& electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "build": {
+    "appId": "com.pomodoro.app",
+    "productName": "番茄钟",
+    "directories": {
+      "output": "release"
+    },
+    "win": {
+      "target": "portable",
+      "icon": null
+    }
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3",
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.0"
+  }
+}
